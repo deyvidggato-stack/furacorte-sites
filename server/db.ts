@@ -167,10 +167,33 @@ export async function createChatVisitor(input: { publicToken: string; username: 
   // though the UI reported an error, causing the next attempt to say
   // "usuário já está cadastrado".
   return db.transaction(async tx => {
-    const visitorResult: any = await tx.insert(chatVisitors).values(input);
-    const visitorId = Number(visitorResult.insertId);
-    const conversationResult: any = await tx.insert(chatConversations).values({ visitorId, status: "open" });
-    return { publicToken: input.publicToken, visitorId, conversationId: Number(conversationResult.insertId) };
+    await tx.insert(chatVisitors).values(input);
+
+    // Do not rely on mysql2/Drizzle exposing insertId here. Depending on the
+    // driver/runtime combination it can be undefined, which would turn the
+    // visitorId into NaN and make the conversation INSERT fail. Read the
+    // generated id back from the unique username inside the same transaction.
+    const visitorRows = await tx
+      .select({ id: chatVisitors.id })
+      .from(chatVisitors)
+      .where(eq(chatVisitors.username, input.username))
+      .limit(1);
+    const visitorId = visitorRows[0]?.id;
+    if (!visitorId) throw new Error("Could not determine new visitor id");
+
+    await tx.insert(chatConversations).values({ visitorId, status: "open" });
+
+    // Fetch the newly-created conversation id rather than relying on insertId.
+    const conversationRows = await tx
+      .select({ id: chatConversations.id })
+      .from(chatConversations)
+      .where(eq(chatConversations.visitorId, visitorId))
+      .orderBy(desc(chatConversations.id))
+      .limit(1);
+    const conversationId = conversationRows[0]?.id;
+    if (!conversationId) throw new Error("Could not determine new conversation id");
+
+    return { publicToken: input.publicToken, visitorId, conversationId };
   });
 }
 
